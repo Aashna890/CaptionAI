@@ -1,0 +1,58 @@
+{
+  "name": "Caption",
+  "type": "object",
+  "properties": {
+    "media_url": {
+      "type": "string",
+      "description": "URL of the uploaded media file"
+    },
+    "media_type": {
+      "type": "string",
+      "enum": [
+        "image",
+        "video",
+        "audio"
+      ],
+      "description": "Type of media uploaded"
+    },
+    "caption_text": {
+      "type": "string",
+      "description": "The generated caption"
+    },
+    "tone": {
+      "type": "number",
+      "description": "Tone preference 0-100 (casual to formal)"
+    },
+    "length_pref": {
+      "type": "number",
+      "description": "Length preference 0-100 (short to detailed)"
+    },
+    "style": {
+      "type": "string",
+      "enum": [
+        "factual",
+        "journalistic",
+        "poetic",
+        "conversational",
+        "academic"
+      ],
+      "description": "Writing style preference"
+    },
+    "platform": {
+      "type": "string",
+      "enum": [
+        "general",
+        "instagram",
+        "linkedin",
+        "twitter",
+        "news_article",
+        "accessibility"
+      ],
+      "description": "Target platform for the caption"
+    }
+  },
+  "required": [
+    "media_url",
+    "caption_text"
+  ]
+}

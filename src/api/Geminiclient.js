@@ -1,0 +1,208 @@
+// ============================================================
+// geminiClient.js  —  drop-in replacement for base44Client.js
+// Uses: Gemini 1.5 Flash for LLM, localStorage for entities
+// ============================================================
+
+const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
+const GEMINI_MODEL   = "gemini-1.5-flash";
+const API_BASE       = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+
+// ─── Helpers ────────────────────────────────────────────────
+
+/** Convert a File/Blob to { base64, mimeType } */
+async function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload  = () => resolve({
+      base64:   reader.result.split(",")[1],
+      mimeType: file.type || "application/octet-stream",
+    });
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Fetch a URL and convert to base64 (for already-uploaded URLs) */
+async function urlToBase64(url) {
+  const res  = await fetch(url);
+  const blob = await res.blob();
+  return fileToBase64(blob);
+}
+
+/** Call Gemini with an arbitrary parts array */
+async function callGemini(parts) {
+  const body = {
+    contents: [{ role: "user", parts }],
+    generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
+  };
+
+  const res = await fetch(API_BASE, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `Gemini API error ${res.status}`);
+  }
+
+  const data = await res.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+}
+
+// ─── Core.InvokeLLM replacement ─────────────────────────────
+
+/**
+ * invokeLLM({ prompt, file_urls?, response_json_schema? })
+ *
+ * - file_urls: array of URLs (images or video) to send inline
+ * - response_json_schema: when present, parse response as JSON
+ */
+export async function invokeLLM({ prompt, file_urls = [], response_json_schema = null }) {
+  const parts = [];
+
+  // Attach each media file as inline_data
+  for (const url of file_urls) {
+    try {
+      const { base64, mimeType } = await urlToBase64(url);
+      parts.push({ inline_data: { mime_type: mimeType, data: base64 } });
+    } catch (e) {
+      console.warn("Could not fetch file for Gemini:", url, e);
+    }
+  }
+
+  // Append the text prompt
+  const finalPrompt = response_json_schema
+    ? `${prompt}\n\nIMPORTANT: Respond ONLY with valid JSON matching this schema — no markdown, no explanation:\n${JSON.stringify(response_json_schema, null, 2)}`
+    : prompt;
+
+  parts.push({ text: finalPrompt });
+
+  const raw = await callGemini(parts);
+
+  if (response_json_schema) {
+    // Strip possible markdown fences before parsing
+    const clean = raw.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+    try {
+      return JSON.parse(clean);
+    } catch {
+      console.error("JSON parse failed, raw response:", raw);
+      throw new Error("Gemini returned invalid JSON");
+    }
+  }
+
+  return raw.trim();
+}
+
+// ─── Core.UploadFile replacement ────────────────────────────
+
+/**
+ * uploadFile({ file })
+ * Creates a local object URL so the rest of the app can preview
+ * the media. Gemini receives the raw base64 on generation — we
+ * store the base64 alongside the object URL in a module-level map.
+ *
+ * Returns { file_url }  (mirrors base44 response shape)
+ */
+const _fileDataMap = new Map(); // objectURL → { base64, mimeType }
+
+export async function uploadFile({ file }) {
+  const { base64, mimeType } = await fileToBase64(file);
+  const objectUrl = URL.createObjectURL(file);
+  _fileDataMap.set(objectUrl, { base64, mimeType });
+  return { file_url: objectUrl };
+}
+
+/**
+ * Retrieve base64 data for a previously uploaded object URL.
+ * Used internally by invokeLLM when it encounters a blob: URL.
+ */
+export function getFileData(url) {
+  return _fileDataMap.get(url) ?? null;
+}
+
+// ─── Entities / localStorage CRUD ───────────────────────────
+
+function storageKey(entityName) {
+  return `captionai_${entityName.toLowerCase()}`;
+}
+
+function loadAll(entityName) {
+  try {
+    return JSON.parse(localStorage.getItem(storageKey(entityName)) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function saveAll(entityName, records) {
+  localStorage.setItem(storageKey(entityName), JSON.stringify(records));
+}
+
+function makeEntity(entityName) {
+  return {
+    /** list(sortField, limit) — sortField may start with "-" for descending */
+    list(sortField = "-created_date", limit = 50) {
+      let records = loadAll(entityName);
+      if (sortField) {
+        const desc = sortField.startsWith("-");
+        const field = desc ? sortField.slice(1) : sortField;
+        records.sort((a, b) => {
+          const av = a[field] ?? "";
+          const bv = b[field] ?? "";
+          return desc ? (bv > av ? 1 : -1) : (av > bv ? 1 : -1);
+        });
+      }
+      return Promise.resolve(records.slice(0, limit));
+    },
+
+    create(data) {
+      const records = loadAll(entityName);
+      const record  = {
+        id:           crypto.randomUUID(),
+        created_date: new Date().toISOString(),
+        ...data,
+      };
+      records.push(record);
+      saveAll(entityName, records);
+      return Promise.resolve(record);
+    },
+
+    update(id, data) {
+      const records = loadAll(entityName);
+      const idx     = records.findIndex((r) => r.id === id);
+      if (idx === -1) return Promise.reject(new Error("Record not found"));
+      records[idx]  = { ...records[idx], ...data };
+      saveAll(entityName, records);
+      return Promise.resolve(records[idx]);
+    },
+
+    delete(id) {
+      const records = loadAll(entityName).filter((r) => r.id !== id);
+      saveAll(entityName, records);
+      return Promise.resolve({ id });
+    },
+
+    get(id) {
+      const record = loadAll(entityName).find((r) => r.id === id);
+      return record
+        ? Promise.resolve(record)
+        : Promise.reject(new Error("Record not found"));
+    },
+  };
+}
+
+// ─── Public API (mirrors the shape the app uses from base44) ─
+
+export const gemini = {
+  integrations: {
+    Core: {
+      InvokeLLM: invokeLLM,
+      UploadFile: uploadFile,
+    },
+  },
+  entities: {
+    Caption: makeEntity("Caption"),
+  },
+};

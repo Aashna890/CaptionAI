@@ -1,20 +1,22 @@
 import React from "react";
-import { gemini } from "@/api/geminiClient";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Trash2, Clock, Loader2, Film, Image } from "lucide-react";
+import { gemini } from "../api/geminiclient";
+import { useQuery } from "@tanstack/react-query";
+import { Copy, Trash2, Image, Clock, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/use-toast";
 import { motion } from "framer-motion";
 import { format } from "date-fns";
+import { useQueryClient } from "@tanstack/react-query";
 
 export default function History() {
-  const { toast }      = useToast();
-  const queryClient    = useQueryClient();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
 
-  const { data: captions = [], isLoading } = useQuery({
+  const { data: captions, isLoading } = useQuery({
     queryKey: ["captions"],
-    queryFn:  () => gemini.entities.Caption.list("-created_date", 50),
+    queryFn: () => gemini.entities.Caption.list("-created_date", 50),
+    initialData: [],
   });
 
   const handleCopy = (text) => {
@@ -67,20 +69,11 @@ export default function History() {
                 transition={{ delay: idx * 0.05 }}
                 className="flex gap-4 p-4 rounded-xl border border-border bg-card hover:bg-card/80 transition-colors"
               >
-                {/* Thumbnail — only for non-blob URLs (blob: URLs don't persist across sessions) */}
-                {item.media_url && !item.media_url.startsWith("blob:") && (
+                {item.media_url && (
                   <div className="w-20 h-20 rounded-lg overflow-hidden border border-border shrink-0">
-                    {item.media_type === "video" ? (
-                      <div className="w-full h-full bg-muted flex items-center justify-center">
-                        <Film className="w-6 h-6 text-cyan-400" />
-                      </div>
-                    ) : (
-                      <img src={item.media_url} alt="" className="w-full h-full object-cover" />
-                    )}
+                    <img src={item.media_url} alt="" className="w-full h-full object-cover" />
                   </div>
                 )}
-
-                {/* Caption text + meta */}
                 <div className="flex-1 min-w-0">
                   <p className="text-sm text-foreground leading-relaxed line-clamp-2">
                     {item.caption_text}
@@ -96,20 +89,13 @@ export default function History() {
                         {item.platform.replace(/_/g, " ")}
                       </Badge>
                     )}
-                    {item.media_type && (
-                      <Badge variant="outline" className="text-xs">
-                        {item.media_type}
-                      </Badge>
-                    )}
                     {item.created_date && (
                       <span className="text-xs text-muted-foreground">
-                        {format(new Date(item.created_date), "MMM d, yyyy · h:mm a")}
+                        {format(new Date(item.created_date), "MMM d, yyyy")}
                       </span>
                     )}
                   </div>
                 </div>
-
-                {/* Actions */}
                 <div className="flex flex-col gap-1 shrink-0">
                   <Button
                     variant="ghost"

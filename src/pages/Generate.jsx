@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { Sparkles, Loader2, Film, Image } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/use-toast";
-import { gemini } from "@/api/geminiClient";
+import { gemini } from "../api/geminiclient";
 import { motion, AnimatePresence } from "framer-motion";
 import MediaUploader from "../components/generate/MediaUploader";
 import PreferencePanel from "../components/generate/PreferencePanel";
@@ -11,26 +11,26 @@ import VideoAnalysisCard from "../components/generate/VideoAnalysisCard";
 import { buildPromptFromPreferences } from "../lib/fuzzyEngine";
 import { analyzeVideo } from "../lib/videoAnalyzer";
 
-// Pipeline step: null | "analyzing" | "generating"
+// Pipeline step: null | "uploading" | "analyzing" | "generating"
 const STEP_LABELS = {
-  analyzing: { label: "Analyzing video...",      sub: "Extracting scenes, subjects & audio context" },
+  analyzing: { label: "Analyzing video...", sub: "Extracting scenes, subjects & audio context" },
   generating: { label: "Generating caption...", sub: "Applying fuzzy preference mapping" },
 };
 
 export default function Generate() {
   const { toast } = useToast();
-  const [mediaUrl,     setMediaUrl]     = useState("");
-  const [mediaType,    setMediaType]    = useState("image");
-  const [isUploading,  setIsUploading]  = useState(false);
-  const [pipelineStep, setPipelineStep] = useState(null);
-  const [isSaving,     setIsSaving]     = useState(false);
-  const [caption,      setCaption]      = useState("");
+  const [mediaUrl, setMediaUrl] = useState("");
+  const [mediaType, setMediaType] = useState("image");
+  const [isUploading, setIsUploading] = useState(false);
+  const [pipelineStep, setPipelineStep] = useState(null); // "analyzing" | "generating"
+  const [isSaving, setIsSaving] = useState(false);
+  const [caption, setCaption] = useState("");
   const [videoContext, setVideoContext] = useState(null);
-  const [preferences,  setPreferences]  = useState({
-    tone:       50,
+  const [preferences, setPreferences] = useState({
+    tone: 50,
     length_pref: 50,
-    style:      "factual",
-    platform:   "general",
+    style: "factual",
+    platform: "general",
   });
 
   const isProcessing = pipelineStep !== null;
@@ -47,28 +47,21 @@ export default function Generate() {
     // Step 1: For video — run analysis (skip if already done)
     if (mediaType === "video" && !ctx) {
       setPipelineStep("analyzing");
-      try {
-        ctx = await analyzeVideo(mediaUrl);
-        setVideoContext(ctx);
-      } catch (e) {
-        toast({ title: "Video analysis failed", description: e.message, variant: "destructive" });
-        setPipelineStep(null);
-        return;
-      }
+      ctx = await analyzeVideo(mediaUrl);
+      setVideoContext(ctx);
     }
 
     // Step 2: Build fuzzy prompt and generate
     setPipelineStep("generating");
-    try {
-      const prompt = buildPromptFromPreferences(preferences, mediaType === "video" ? ctx : null);
-      const result = await gemini.integrations.Core.InvokeLLM({
-        prompt,
-        ...(mediaType === "image" ? { file_urls: [mediaUrl] } : {}),
-      });
-      setCaption(result);
-    } catch (e) {
-      toast({ title: "Caption generation failed", description: e.message, variant: "destructive" });
-    }
+    const prompt = buildPromptFromPreferences(preferences, mediaType === "video" ? ctx : null);
+
+    const result = await gemini.integrations.Core.InvokeLLM({
+      prompt,
+      // For images, pass the file directly; for video, context is already in the prompt
+      ...(mediaType === "image" ? { file_urls: [mediaUrl] } : {}),
+    });
+
+    setCaption(result);
     setPipelineStep(null);
   };
 
@@ -76,35 +69,27 @@ export default function Generate() {
   const handleRegenerate = async () => {
     setCaption("");
     setPipelineStep("generating");
-    try {
-      const prompt = buildPromptFromPreferences(preferences, mediaType === "video" ? videoContext : null);
-      const result = await gemini.integrations.Core.InvokeLLM({
-        prompt,
-        ...(mediaType === "image" ? { file_urls: [mediaUrl] } : {}),
-      });
-      setCaption(result);
-    } catch (e) {
-      toast({ title: "Regeneration failed", description: e.message, variant: "destructive" });
-    }
+    const prompt = buildPromptFromPreferences(preferences, mediaType === "video" ? videoContext : null);
+    const result = await gemini.integrations.Core.InvokeLLM({
+      prompt,
+      ...(mediaType === "image" ? { file_urls: [mediaUrl] } : {}),
+    });
+    setCaption(result);
     setPipelineStep(null);
   };
 
   const handleSave = async () => {
     setIsSaving(true);
-    try {
-      await gemini.entities.Caption.create({
-        media_url:    mediaUrl,
-        media_type:   mediaType,
-        caption_text: caption,
-        tone:         preferences.tone,
-        length_pref:  preferences.length_pref,
-        style:        preferences.style,
-        platform:     preferences.platform,
-      });
-      toast({ title: "Caption saved successfully" });
-    } catch (e) {
-      toast({ title: "Save failed", description: e.message, variant: "destructive" });
-    }
+    await gemini.entities.Caption.create({
+      media_url: mediaUrl,
+      media_type: mediaType,
+      caption_text: caption,
+      tone: preferences.tone,
+      length_pref: preferences.length_pref,
+      style: preferences.style,
+      platform: preferences.platform,
+    });
+    toast({ title: "Caption saved successfully" });
     setIsSaving(false);
   };
 
@@ -144,7 +129,10 @@ export default function Generate() {
               setIsUploading={setIsUploading}
             />
 
-            <PreferencePanel preferences={preferences} setPreferences={setPreferences} />
+            <PreferencePanel
+              preferences={preferences}
+              setPreferences={setPreferences}
+            />
 
             <Button
               onClick={handleGenerate}
@@ -165,6 +153,7 @@ export default function Generate() {
                 : "Generate Caption"}
             </Button>
 
+            {/* Video pipeline note */}
             {mediaType === "video" && !isProcessing && (
               <motion.p
                 initial={{ opacity: 0 }}
@@ -178,6 +167,7 @@ export default function Generate() {
 
           {/* Right Column */}
           <div className="space-y-5">
+            {/* Processing state */}
             <AnimatePresence>
               {isProcessing && (
                 <motion.div
@@ -198,6 +188,7 @@ export default function Generate() {
                     <p className="text-sm text-muted-foreground mt-1">{STEP_LABELS[pipelineStep]?.sub}</p>
                   </div>
 
+                  {/* Step tracker for video */}
                   {mediaType === "video" && (
                     <div className="flex items-center gap-2 mt-2">
                       <PipelineDot active={pipelineStep === "analyzing"} done={pipelineStep === "generating"} label="Analyze" />
@@ -209,10 +200,12 @@ export default function Generate() {
               )}
             </AnimatePresence>
 
+            {/* Video analysis card */}
             {videoContext && !isProcessing && (
               <VideoAnalysisCard context={videoContext} />
             )}
 
+            {/* Caption result */}
             {caption && (
               <CaptionResult
                 caption={caption}
@@ -222,6 +215,7 @@ export default function Generate() {
               />
             )}
 
+            {/* Empty state */}
             {!caption && !isProcessing && (
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <div className="w-20 h-20 rounded-2xl bg-muted flex items-center justify-center mb-4">
@@ -236,6 +230,7 @@ export default function Generate() {
               </div>
             )}
 
+            {/* Fuzzy Logic Parameters */}
             {caption && !isProcessing && (
               <motion.div
                 initial={{ opacity: 0, y: 10 }}
@@ -247,9 +242,9 @@ export default function Generate() {
                   Fuzzy Logic Parameters
                 </h4>
                 <div className="grid grid-cols-2 gap-3">
-                  <FuzzyParam label="Tone"     value={preferences.tone}        color="from-purple-500 to-blue-500" />
-                  <FuzzyParam label="Length"   value={preferences.length_pref} color="from-blue-500 to-cyan-500" />
-                  <FuzzyParam label="Style"    value={preferences.style}    isText color="from-cyan-500 to-green-500" />
+                  <FuzzyParam label="Tone" value={preferences.tone} color="from-purple-500 to-blue-500" />
+                  <FuzzyParam label="Length" value={preferences.length_pref} color="from-blue-500 to-cyan-500" />
+                  <FuzzyParam label="Style" value={preferences.style} isText color="from-cyan-500 to-green-500" />
                   <FuzzyParam label="Platform" value={preferences.platform} isText color="from-green-500 to-yellow-500" />
                 </div>
               </motion.div>
@@ -270,7 +265,10 @@ function FuzzyParam({ label, value, isText, color }) {
       ) : (
         <div className="flex items-center gap-2">
           <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
-            <div className={`h-full rounded-full bg-gradient-to-r ${color}`} style={{ width: `${value}%` }} />
+            <div
+              className={`h-full rounded-full bg-gradient-to-r ${color}`}
+              style={{ width: `${value}%` }}
+            />
           </div>
           <span className="text-xs font-medium text-foreground">{value}%</span>
         </div>

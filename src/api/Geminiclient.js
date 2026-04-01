@@ -1,10 +1,5 @@
-// ============================================================
-// geminiClient.js  —  drop-in replacement for base44Client.js
-// Uses: Gemini 1.5 Flash for LLM, localStorage for entities
-// ============================================================
-
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
-const GEMINI_MODEL   = "gemini-1.5-flash";
+const GEMINI_MODEL   = "gemini-2.5-flash";
 const API_BASE       = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
 // ─── Helpers ────────────────────────────────────────────────
@@ -16,6 +11,7 @@ async function fileToBase64(file) {
     reader.onload  = () => resolve({
       base64:   reader.result.split(",")[1],
       mimeType: file.type || "application/octet-stream",
+      dataUrl:  reader.result,           // full data URL e.g. "data:image/png;base64,..."
     });
     reader.onerror = reject;
     reader.readAsDataURL(file);
@@ -24,6 +20,12 @@ async function fileToBase64(file) {
 
 /** Fetch a URL and convert to base64 (for already-uploaded URLs) */
 async function urlToBase64(url) {
+  // If it's already a data URL, parse directly
+  if (url.startsWith("data:")) {
+    const [meta, base64] = url.split(",");
+    const mimeType = meta.split(":")[1].split(";")[0];
+    return { base64, mimeType, dataUrl: url };
+  }
   const res  = await fetch(url);
   const blob = await res.blob();
   return fileToBase64(blob);
@@ -53,16 +55,9 @@ async function callGemini(parts) {
 
 // ─── Core.InvokeLLM replacement ─────────────────────────────
 
-/**
- * invokeLLM({ prompt, file_urls?, response_json_schema? })
- *
- * - file_urls: array of URLs (images or video) to send inline
- * - response_json_schema: when present, parse response as JSON
- */
 export async function invokeLLM({ prompt, file_urls = [], response_json_schema = null }) {
   const parts = [];
 
-  // Attach each media file as inline_data
   for (const url of file_urls) {
     try {
       const { base64, mimeType } = await urlToBase64(url);
@@ -72,7 +67,6 @@ export async function invokeLLM({ prompt, file_urls = [], response_json_schema =
     }
   }
 
-  // Append the text prompt
   const finalPrompt = response_json_schema
     ? `${prompt}\n\nIMPORTANT: Respond ONLY with valid JSON matching this schema — no markdown, no explanation:\n${JSON.stringify(response_json_schema, null, 2)}`
     : prompt;
@@ -82,7 +76,6 @@ export async function invokeLLM({ prompt, file_urls = [], response_json_schema =
   const raw = await callGemini(parts);
 
   if (response_json_schema) {
-    // Strip possible markdown fences before parsing
     const clean = raw.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
     try {
       return JSON.parse(clean);
@@ -97,29 +90,11 @@ export async function invokeLLM({ prompt, file_urls = [], response_json_schema =
 
 // ─── Core.UploadFile replacement ────────────────────────────
 
-/**
- * uploadFile({ file })
- * Creates a local object URL so the rest of the app can preview
- * the media. Gemini receives the raw base64 on generation — we
- * store the base64 alongside the object URL in a module-level map.
- *
- * Returns { file_url }  (mirrors base44 response shape)
- */
-const _fileDataMap = new Map(); // objectURL → { base64, mimeType }
-
+/** Convert a File/Blob to { base64, mimeType } */
 export async function uploadFile({ file }) {
-  const { base64, mimeType } = await fileToBase64(file);
-  const objectUrl = URL.createObjectURL(file);
-  _fileDataMap.set(objectUrl, { base64, mimeType });
-  return { file_url: objectUrl };
-}
-
-/**
- * Retrieve base64 data for a previously uploaded object URL.
- * Used internally by invokeLLM when it encounters a blob: URL.
- */
-export function getFileData(url) {
-  return _fileDataMap.get(url) ?? null;
+  const { dataUrl } = await fileToBase64(file);
+  // Return the data URL directly — it works for <img src> AND for Gemini inline_data
+  return { file_url: dataUrl };
 }
 
 // ─── Entities / localStorage CRUD ───────────────────────────
@@ -142,7 +117,6 @@ function saveAll(entityName, records) {
 
 function makeEntity(entityName) {
   return {
-    /** list(sortField, limit) — sortField may start with "-" for descending */
     list(sortField = "-created_date", limit = 50) {
       let records = loadAll(entityName);
       if (sortField) {
@@ -193,7 +167,7 @@ function makeEntity(entityName) {
   };
 }
 
-// ─── Public API (mirrors the shape the app uses from base44) ─
+// ─── Public API ──────────────────────────────────────────────
 
 export const gemini = {
   integrations: {

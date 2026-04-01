@@ -2,7 +2,7 @@ import React, { useCallback } from "react";
 import { Upload, X, Loader2, Image, Film } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { motion, AnimatePresence } from "framer-motion";
-import { uploadFile } from "@/api/geminiClient";
+import { uploadFile } from "@/api/geminiclient";
 
 function getMediaType(file) {
   if (file.type.startsWith("video/")) return "video";

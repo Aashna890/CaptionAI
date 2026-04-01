@@ -1,4 +1,4 @@
-import { invokeLLM } from "@/api/geminiClient";
+import { invokeLLM } from "@/api/geminiclient";
 
 /**
  * Analyzes a video URL using Gemini 1.5 Flash (multimodal).

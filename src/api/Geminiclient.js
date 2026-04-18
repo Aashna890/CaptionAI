@@ -1,5 +1,5 @@
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
-const GEMINI_MODEL   = "gemini-2.5-flash";
+const GEMINI_MODEL   = "gemini-2.5-flash-lite";
 const API_BASE       = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
 // ─── Helpers ────────────────────────────────────────────────
@@ -111,11 +111,62 @@ function loadAll(entityName) {
   }
 }
 
+// ─── Quota-safe storage helpers ─────────────────────────────────────────────
+
+// Strip data URLs that are too large (> 20 KB) — keeps small thumbnails, drops
+// full-resolution base64 images that would blow the 5 MB localStorage quota.
+const MAX_DATA_URL_BYTES = 20 * 1024; // 20 KB
+
+function sanitiseRecord(record) {
+  const out = { ...record };
+  if (
+    typeof out.media_url === "string" &&
+    out.media_url.startsWith("data:") &&
+    out.media_url.length > MAX_DATA_URL_BYTES
+  ) {
+    out.media_url = "";
+  }
+  return out;
+}
+
+/** One-time migration: purge bloated media_url values already in storage */
+function migrateEntity(entityName) {
+  try {
+    const raw = localStorage.getItem(storageKey(entityName));
+    if (!raw) return;
+    const records = JSON.parse(raw);
+    const cleaned = records.map(sanitiseRecord);
+    localStorage.setItem(storageKey(entityName), JSON.stringify(cleaned));
+  } catch {
+    // If already corrupt or over-quota, wipe and start fresh
+    localStorage.removeItem(storageKey(entityName));
+  }
+}
+
 function saveAll(entityName, records) {
-  localStorage.setItem(storageKey(entityName), JSON.stringify(records));
+  const sanitised = records.map(sanitiseRecord);
+  try {
+    localStorage.setItem(storageKey(entityName), JSON.stringify(sanitised));
+  } catch (e) {
+    if (e.name === "QuotaExceededError") {
+      // Drop oldest half and retry once
+      const trimmed = sanitised.slice(Math.floor(sanitised.length / 2));
+      try {
+        localStorage.setItem(storageKey(entityName), JSON.stringify(trimmed));
+      } catch {
+        console.error("localStorage still full after trimming — clearing entity store");
+        localStorage.removeItem(storageKey(entityName));
+      }
+    } else {
+      throw e;
+    }
+  }
 }
 
 function makeEntity(entityName) {
+  // Clean up any previously-stored full-resolution base64 blobs on first load
+  migrateEntity(entityName);
+
   return {
     list(sortField = "-created_date", limit = 50) {
       let records = loadAll(entityName);

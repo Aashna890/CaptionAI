@@ -15,6 +15,7 @@ const platforms = [
   { value: "general", label: "General" },
   { value: "instagram", label: "Instagram" },
   { value: "linkedin", label: "LinkedIn" },
+  { value: "youtube", label: "YouTube" },
   { value: "twitter", label: "Twitter / X" },
   { value: "news_article", label: "News Article" },
   { value: "accessibility", label: "Accessibility (Alt-text)" },

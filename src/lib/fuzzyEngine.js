@@ -33,6 +33,7 @@ function getPlatformInstruction(platform) {
     general: "",
     instagram: "Format for Instagram: engaging, with relevant emoji, and suggest 3-5 hashtags at the end.",
     linkedin: "Format for LinkedIn: professional, insightful, and thought-provoking. No hashtags unless relevant.",
+    youtube: "Format for YouTube: write a descriptive, engaging video caption/description. Include a compelling first line as a hook, followed by context. Can be 2-3 sentences. Avoid hashtags unless at the very end.",
     twitter: "Format for Twitter/X: concise, punchy, under 280 characters. Make every word count.",
     news_article: "Format as a news caption: informative, objective, with who/what/where/when if applicable.",
     accessibility: "Format as accessibility alt-text: describe the image objectively and thoroughly for visually impaired users. Focus on what is depicted, spatial relationships, colors, and any text visible.",

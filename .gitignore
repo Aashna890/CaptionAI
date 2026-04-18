@@ -29,3 +29,20 @@ dist-ssr
 
 .env
 .vite
+
+# Dataset images - too large for GitHub
+backend/images/**/*.jpg
+backend/images/**/*.jpeg
+backend/images/**/*.png
+!backend/images/**/.gitkeep
+
+# Dataset images - too large for GitHub
+backend/images/**/*.jpg
+backend/images/**/*.jpeg
+backend/images/**/*.png
+backend/images/**/*.bmp
+backend/dataset/**/*.jpg
+backend/dataset/**/*.jpeg
+backend/dataset/**/*.png
+!backend/images/**/.gitkeep
+!backend/dataset/**/.gitkeep

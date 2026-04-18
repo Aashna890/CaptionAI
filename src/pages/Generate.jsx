@@ -1,5 +1,5 @@
-import React, { useState } from "react";
-import { Sparkles, Loader2, Film, Image } from "lucide-react";
+import React, { useState, useEffect } from "react";
+import { Sparkles, Loader2, Film } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/use-toast";
 import { gemini } from "../api/geminiclient";
@@ -8,98 +8,194 @@ import MediaUploader from "../components/generate/MediaUploader";
 import PreferencePanel from "../components/generate/PreferencePanel";
 import CaptionResult from "../components/generate/CaptionResult";
 import VideoAnalysisCard from "../components/generate/VideoAnalysisCard";
+import KnnRecommendBanner from "../components/generate/KnnRecommendBanner";
+import MoodDetectorBadge from "../components/generate/MoodDetectorBadge";
+import { detectMood } from "../lib/moodDetector";
 import { buildPromptFromPreferences } from "../lib/fuzzyEngine";
 import { analyzeVideo } from "../lib/videoAnalyzer";
+import { knnRecommend } from "../lib/knnRecommender";
 
-// Pipeline step: null | "uploading" | "analyzing" | "generating"
+// ─── Compress image to small thumbnail for localStorage ──────────────────────
+async function makeThumbnail(dataUrl, size = 80, quality = 0.6) {
+  return new Promise((resolve) => {
+    if (!dataUrl || !dataUrl.startsWith("data:image")) { resolve(""); return; }
+    const img = new window.Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      const ratio  = Math.min(size / img.width, size / img.height);
+      canvas.width  = Math.round(img.width  * ratio);
+      canvas.height = Math.round(img.height * ratio);
+      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL("image/jpeg", quality));
+    };
+    img.onerror = () => resolve("");
+    img.src = dataUrl;
+  });
+}
+
 const STEP_LABELS = {
-  analyzing: { label: "Analyzing video...", sub: "Extracting scenes, subjects & audio context" },
+  analyzing:  { label: "Analyzing video...",    sub: "Extracting scenes, subjects & audio context" },
   generating: { label: "Generating caption...", sub: "Applying fuzzy preference mapping" },
 };
 
 export default function Generate() {
   const { toast } = useToast();
-  const [mediaUrl, setMediaUrl] = useState("");
-  const [mediaType, setMediaType] = useState("image");
-  const [isUploading, setIsUploading] = useState(false);
-  const [pipelineStep, setPipelineStep] = useState(null); // "analyzing" | "generating"
-  const [isSaving, setIsSaving] = useState(false);
-  const [caption, setCaption] = useState("");
+
+  // ── Media state ──
+  const [mediaUrl,     setMediaUrl]     = useState("");
+  const [mediaType,    setMediaType]    = useState("image");
+  const [isUploading,  setIsUploading]  = useState(false);
+
+  // ── Pipeline state ──
+  const [pipelineStep, setPipelineStep] = useState(null);
+  const [isSaving,     setIsSaving]     = useState(false);
+  const [caption,      setCaption]      = useState("");
   const [videoContext, setVideoContext] = useState(null);
+
+  // ── Preferences ──
   const [preferences, setPreferences] = useState({
-    tone: 50,
-    length_pref: 50,
-    style: "factual",
-    platform: "general",
+    tone: 50, length_pref: 50, style: "factual", platform: "general",
   });
+
+  // ── KNN state ──
+  const [knnRecommendation, setKnnRecommendation] = useState(null);
+  const [knnDismissed,      setKnnDismissed]      = useState(false);
+
+  // ── Mood state ──
+  const [moodResult,      setMoodResult]      = useState(null);
+  const [isMoodDetecting, setIsMoodDetecting] = useState(false);
+  const [moodApplied,     setMoodApplied]     = useState(false);
 
   const isProcessing = pipelineStep !== null;
 
+  // ── Load history and run KNN on mount ────────────────────────────────────
+  useEffect(() => {
+    async function runKnn() {
+      try {
+        const history = await gemini.entities.Caption.list("-created_date", 50);
+        const rec = knnRecommend(history, preferences, 3);
+        if (rec) {
+          setKnnRecommendation(rec);
+          setKnnDismissed(false);
+        }
+      } catch (e) {
+        console.warn("KNN failed:", e);
+      }
+    }
+    runKnn();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Apply KNN recommendation ──────────────────────────────────────────────
+  const handleApplyKnn = () => {
+    if (!knnRecommendation) return;
+    setPreferences({
+      tone:        knnRecommendation.tone,
+      length_pref: knnRecommendation.length_pref,
+      style:       knnRecommendation.style,
+      platform:    knnRecommendation.platform,
+    });
+    setKnnDismissed(true);
+    toast({ title: "KNN preferences applied!" });
+  };
+
+  // ── Handle media URL change (with mood detection for images) ─────────────
+  const handleSetMediaUrl = async (url, type) => {
+    setMediaUrl(url);
+    setVideoContext(null);
+    setCaption("");
+    setMoodResult(null);
+    setMoodApplied(false);
+
+    // Auto-detect mood for images
+    if ((type ?? mediaType) === "image" && url) {
+      setIsMoodDetecting(true);
+      try {
+        const result = await detectMood(url);
+        setMoodResult(result);
+        // Auto-apply suggested tone
+        setPreferences((prev) => ({ ...prev, tone: result.tone }));
+        setMoodApplied(true);
+      } catch (e) {
+        console.warn("Mood detection failed:", e);
+      } finally {
+        setIsMoodDetecting(false);
+      }
+    }
+  };
+
+  // ── Generate ──────────────────────────────────────────────────────────────
   const handleGenerate = async () => {
     if (!mediaUrl) {
       toast({ title: `Please upload a ${mediaType} first`, variant: "destructive" });
       return;
     }
-
     setCaption("");
     let ctx = videoContext;
-
-    // Step 1: For video — run analysis (skip if already done)
-    if (mediaType === "video" && !ctx) {
-      setPipelineStep("analyzing");
-      ctx = await analyzeVideo(mediaUrl);
-      setVideoContext(ctx);
+    try {
+      if (mediaType === "video" && !ctx) {
+        setPipelineStep("analyzing");
+        ctx = await analyzeVideo(mediaUrl);
+        setVideoContext(ctx);
+      }
+      setPipelineStep("generating");
+      const prompt = buildPromptFromPreferences(preferences, mediaType === "video" ? ctx : null);
+      const result = await gemini.integrations.Core.InvokeLLM({
+        prompt,
+        ...(mediaType === "image" ? { file_urls: [mediaUrl] } : {}),
+      });
+      setCaption(result);
+    } catch (err) {
+      console.error("Generation failed:", err);
+      toast({ title: "Failed to generate caption", variant: "destructive" });
+    } finally {
+      setPipelineStep(null);
     }
-
-    // Step 2: Build fuzzy prompt and generate
-    setPipelineStep("generating");
-    const prompt = buildPromptFromPreferences(preferences, mediaType === "video" ? ctx : null);
-
-    const result = await gemini.integrations.Core.InvokeLLM({
-      prompt,
-      // For images, pass the file directly; for video, context is already in the prompt
-      ...(mediaType === "image" ? { file_urls: [mediaUrl] } : {}),
-    });
-
-    setCaption(result);
-    setPipelineStep(null);
   };
 
-  // Re-run only caption step (reuse existing video analysis)
+  // ── Regenerate ────────────────────────────────────────────────────────────
   const handleRegenerate = async () => {
     setCaption("");
     setPipelineStep("generating");
-    const prompt = buildPromptFromPreferences(preferences, mediaType === "video" ? videoContext : null);
-    const result = await gemini.integrations.Core.InvokeLLM({
-      prompt,
-      ...(mediaType === "image" ? { file_urls: [mediaUrl] } : {}),
-    });
-    setCaption(result);
-    setPipelineStep(null);
+    try {
+      const prompt = buildPromptFromPreferences(preferences, mediaType === "video" ? videoContext : null);
+      const result = await gemini.integrations.Core.InvokeLLM({
+        prompt,
+        ...(mediaType === "image" ? { file_urls: [mediaUrl] } : {}),
+      });
+      setCaption(result);
+    } catch (err) {
+      console.error("Regeneration failed:", err);
+      toast({ title: "Failed to regenerate caption", variant: "destructive" });
+    } finally {
+      setPipelineStep(null);
+    }
   };
 
+  // ── Save ──────────────────────────────────────────────────────────────────
   const handleSave = async () => {
     setIsSaving(true);
-    await gemini.entities.Caption.create({
-      media_url: mediaUrl,
-      media_type: mediaType,
-      caption_text: caption,
-      tone: preferences.tone,
-      length_pref: preferences.length_pref,
-      style: preferences.style,
-      platform: preferences.platform,
-    });
-    toast({ title: "Caption saved successfully" });
-    setIsSaving(false);
+    try {
+      const thumbnail = mediaType === "image" ? await makeThumbnail(mediaUrl) : "";
+      await gemini.entities.Caption.create({
+        media_url:    thumbnail,
+        media_type:   mediaType,
+        caption_text: caption,
+        tone:         preferences.tone,
+        length_pref:  preferences.length_pref,
+        style:        preferences.style,
+        platform:     preferences.platform,
+      });
+      toast({ title: "Caption saved successfully" });
+    } catch (err) {
+      console.error("Save failed:", err);
+      toast({ title: "Failed to save caption", variant: "destructive" });
+    } finally {
+      setIsSaving(false);
+    }
   };
 
-  // Reset video context when a new file is uploaded
-  const handleSetMediaUrl = (url) => {
-    setMediaUrl(url);
-    setVideoContext(null);
-    setCaption("");
-  };
-
+  // ─────────────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen pb-20">
       {/* Header */}
@@ -115,19 +211,54 @@ export default function Generate() {
         </div>
       </div>
 
-      {/* Main Content */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="grid lg:grid-cols-2 gap-8">
-          {/* Left Column */}
-          <div className="space-y-8">
+
+          {/* ── Left Column ── */}
+          <div className="space-y-5">
+
             <MediaUploader
               mediaUrl={mediaUrl}
               mediaType={mediaType}
-              setMediaUrl={handleSetMediaUrl}
-              setMediaType={setMediaType}
+              setMediaUrl={(url) => handleSetMediaUrl(url, mediaType)}
+              setMediaType={(type) => { setMediaType(type); }}
               isUploading={isUploading}
               setIsUploading={setIsUploading}
             />
+
+            {/* Mood Detector Badge */}
+            <AnimatePresence>
+              {(isMoodDetecting || moodResult) && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                >
+                  <MoodDetectorBadge
+                    result={moodResult}
+                    isDetecting={isMoodDetecting}
+                    applied={moodApplied}
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* KNN Recommendation Banner */}
+            <AnimatePresence>
+              {knnRecommendation && !knnDismissed && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                >
+                  <KnnRecommendBanner
+                    recommendation={knnRecommendation}
+                    onApply={handleApplyKnn}
+                    onDismiss={() => setKnnDismissed(true)}
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             <PreferencePanel
               preferences={preferences}
@@ -153,20 +284,20 @@ export default function Generate() {
                 : "Generate Caption"}
             </Button>
 
-            {/* Video pipeline note */}
             {mediaType === "video" && !isProcessing && (
               <motion.p
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                className="text-xs text-muted-foreground text-center -mt-4"
+                className="text-xs text-muted-foreground text-center -mt-2"
               >
                 Video pipeline: upload → scene extraction → fuzzy caption
               </motion.p>
             )}
           </div>
 
-          {/* Right Column */}
+          {/* ── Right Column ── */}
           <div className="space-y-5">
+
             {/* Processing state */}
             <AnimatePresence>
               {isProcessing && (
@@ -187,8 +318,6 @@ export default function Generate() {
                     <p className="font-medium text-foreground">{STEP_LABELS[pipelineStep]?.label}</p>
                     <p className="text-sm text-muted-foreground mt-1">{STEP_LABELS[pipelineStep]?.sub}</p>
                   </div>
-
-                  {/* Step tracker for video */}
                   {mediaType === "video" && (
                     <div className="flex items-center gap-2 mt-2">
                       <PipelineDot active={pipelineStep === "analyzing"} done={pipelineStep === "generating"} label="Analyze" />
@@ -201,9 +330,7 @@ export default function Generate() {
             </AnimatePresence>
 
             {/* Video analysis card */}
-            {videoContext && !isProcessing && (
-              <VideoAnalysisCard context={videoContext} />
-            )}
+            {videoContext && !isProcessing && <VideoAnalysisCard context={videoContext} />}
 
             {/* Caption result */}
             {caption && (
@@ -242,9 +369,9 @@ export default function Generate() {
                   Fuzzy Logic Parameters
                 </h4>
                 <div className="grid grid-cols-2 gap-3">
-                  <FuzzyParam label="Tone" value={preferences.tone} color="from-purple-500 to-blue-500" />
-                  <FuzzyParam label="Length" value={preferences.length_pref} color="from-blue-500 to-cyan-500" />
-                  <FuzzyParam label="Style" value={preferences.style} isText color="from-cyan-500 to-green-500" />
+                  <FuzzyParam label="Tone"     value={preferences.tone}        color="from-purple-500 to-blue-500" />
+                  <FuzzyParam label="Length"   value={preferences.length_pref} color="from-blue-500 to-cyan-500" />
+                  <FuzzyParam label="Style"    value={preferences.style}    isText color="from-cyan-500 to-green-500" />
                   <FuzzyParam label="Platform" value={preferences.platform} isText color="from-green-500 to-yellow-500" />
                 </div>
               </motion.div>
@@ -265,10 +392,7 @@ function FuzzyParam({ label, value, isText, color }) {
       ) : (
         <div className="flex items-center gap-2">
           <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
-            <div
-              className={`h-full rounded-full bg-gradient-to-r ${color}`}
-              style={{ width: `${value}%` }}
-            />
+            <div className={`h-full rounded-full bg-gradient-to-r ${color}`} style={{ width: `${value}%` }} />
           </div>
           <span className="text-xs font-medium text-foreground">{value}%</span>
         </div>
